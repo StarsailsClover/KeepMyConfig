@@ -227,6 +227,8 @@ MCP registry 文档；以 `overlay_wins` 合并并集，并在写入前生成 `p
 | 修复把你不再想要的值带回来了 | 用 `capture` 重建基线，或改 `policy.toml` |
 | CC Switch 仍然反复覆写 | `keepmyconfig ccswitch adopt --apply` |
 | `auth.json` 不是最新 | 它被刻意排除在自动恢复之外；重新登录，或谨慎使用 `restore-assets --include-backup-only` |
+| Codex 桌面端回到旧界面、中文消失 | 壳的界面资源是启动时联网获取的，一旦抓取失败就会回退到内置经典界面。恢复可用出口后完全退出并重开即可，**无需重新登录**。用 `curl https://chatgpt.com` 返回 403 是 Cloudflare 拦脚本，不能作为判据；判断出口请用 `https://github.com`。 |
+| 换代理或节点后界面又退回旧版 | 把 Clash 分组（`GLOBAL` 或你的订阅分组）切到可达地区即可。Clash for Windows 会把选择持久化到 `profiles/list.yml` 与 `cache.db`，重启不丢。**目前没有支持的方式能锁定壳版本。** |
 
 ## 9. 安全说明
 

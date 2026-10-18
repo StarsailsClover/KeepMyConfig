@@ -135,3 +135,83 @@ fn doctor_reports_environment() {
     let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert!(report["checks"].as_array().unwrap().len() >= 4);
 }
+
+fn sessions_fixture(config: &str, rollout: &str) -> Fixture {
+    let fixture = Fixture::new(config);
+    let dir = format!("{}/sessions/2026/10", fixture.home);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        format!("{dir}/rollout-2026-10-10T22-33-45-01a1263b-f0d4-7923-a669-1fe83bffb487.jsonl"),
+        rollout,
+    )
+    .unwrap();
+    fixture
+}
+
+fn orphan_rollout() -> String {
+    let meta = serde_json::json!({
+        "timestamp": "2026-10-10T15:00:00.000Z",
+        "ordinal": 0,
+        "type": "session_meta",
+        "payload": { "session_id": "01a1263b-f0d4-7923-a669-1fe83bffb487" },
+    });
+    let output = serde_json::json!({
+        "timestamp": "2026-10-10T15:00:00.000Z",
+        "ordinal": 7,
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "id": "fco_demo",
+            "call_id": null,
+            "name": "create_thread",
+            "namespace": "codex_app",
+            "output": "<codex_delegation><input>do work</input></codex_delegation>",
+        },
+    });
+    format!("{meta}\n{output}\n")
+}
+
+#[test]
+fn sessions_scan_exits_two_and_repair_cleans_up() {
+    let fixture = sessions_fixture(FULL_CONFIG, &orphan_rollout());
+
+    let scan = fixture
+        .command()
+        .args(["sessions", "scan", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(scan.status.code(), Some(2), "scan should flag the orphan");
+    let report: serde_json::Value = serde_json::from_slice(&scan.stdout).unwrap();
+    assert_eq!(report["orphan_outputs"], 1);
+    assert_eq!(report["delegation_orphans"], 1);
+
+    // Dry run leaves the file alone.
+    let rollout = format!(
+        "{}/sessions/2026/10/rollout-2026-10-10T22-33-45-01a1263b-f0d4-7923-a669-1fe83bffb487.jsonl",
+        fixture.home
+    );
+    let before = fs::read_to_string(&rollout).unwrap();
+    let dry = fixture
+        .command()
+        .args(["sessions", "repair"])
+        .output()
+        .unwrap();
+    assert!(dry.status.success());
+    assert_eq!(fs::read_to_string(&rollout).unwrap(), before);
+
+    let apply = fixture
+        .command()
+        .args(["sessions", "repair", "--apply"])
+        .output()
+        .unwrap();
+    assert!(apply.status.success(), "repair failed: {apply:?}");
+    let fixed = fs::read_to_string(&rollout).unwrap();
+    assert!(!fixed.contains("codex_delegation"));
+
+    let rescan = fixture
+        .command()
+        .args(["sessions", "scan"])
+        .output()
+        .unwrap();
+    assert_eq!(rescan.status.code(), Some(0), "nothing left to repair");
+}

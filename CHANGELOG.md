@@ -7,6 +7,84 @@ and this project adheres to the BC version scheme (`v{Year}.{Major}-Alpha N`).
 
 ## [Unreleased]
 
+## [v26.0-Alpha.9] — 2026-10-11
+
+### Added
+
+- `sessions scan [--full] [--json]`: report unpaired tool records across every
+  Codex rollout under `sessions/` and `archived_sessions/`. Exits 2 when any
+  orphan tool result is present. Findings are classified as `orphan-output`
+  (a tool result with no matching call) or `dangling-call` (an interrupted
+  call), and cross-session delegation results are tagged `delegation`.
+- `sessions repair [--apply] [--what outputs|calls|all] [--purge-projection]
+  [--force]`: dry-run by default; removes the selected records from each
+  rollout, backs every rollout into `backups/sessions/<ts>/`, rewrites the file
+  atomically, and rewinds the history-projection cursor so the app rebuilds its
+  state. Every write is journaled. The history database is refused while
+  `codex.exe` is running unless `--force`, and a database snapshot is taken
+  before any projection change.
+- `bus init|post|read|unread|popup [--cowork PATH]`: a cross-session
+  collaboration bus that replaces the session-damaging in-app message system. It
+  keeps the human-readable append-only Markdown board and adds a
+  machine-readable `bus/index.jsonl` index plus per-actor read cursors. Posting
+  is atomic and duplicate-safe; `read --as ACTOR` advances that actor's cursor;
+  `popup` shows a desktop toast without waking any session.
+- `bus adopt --channel CHANNEL`: backfill the index from an existing hand-written
+  `messages.md` without touching the board. History is marked broadcast and
+  already read so a live session is not flooded with unread mail; re-running is
+  idempotent.
+- `rules [--lang zh|en]`: print the recommended AGENTS.md collaboration block
+  verbatim for pasting into any project.
+- `bus watch [--once] [--dry-run] [--poll 60s] --channel C --as ACTOR`: a
+  notify-only watcher. It toasts new mail addressed to `ACTOR` and advances that
+  actor's cursor, and it never enqueues work into any session. `--dry-run`
+  counts without moving the cursor.
+- `autostart install` now also carries the collaboration-bus watcher: it always
+  watches the shared `env-ops` channel for the `Ops` actor and accepts extra
+  `--bus CHANNEL=ACTOR` watches. Both the Startup loop and the Task Scheduler
+  wrapper are regenerated from the same list.
+- `sessions trim-images [--apply] [--thread ID] [--purge-projection]`:
+  replaces inline base64 images in rollouts with a short path-only placeholder.
+  A session that accumulated dozens of screenshots re-uploads them every turn,
+  which makes the request enormous and the streaming response stall with
+  `stream disconnected before completion`. Dry-run by default; backs up each
+  rollout, rewrites atomically, and rewinds the projection cursor to the start of
+  the file so the app replays it. A rollout that is open in Codex (its file is
+  held by the app) is skipped with a note instead of being written underneath a
+  live session.
+
+### Fixed
+
+- The default policy now pins `model_provider` inside the `managed` subtree.
+  A CC Switch live takeover that rewrites the active provider to `custom` is
+  repaired instead of captured, so a session's provider identity survives every
+  takeover. Switching providers on purpose is a two-step flow by design: run
+  `keepmyconfig capture` first, then flip the provider in CC Switch.
+- Pinning a whole table (for example `model_providers.SailsAPI`) makes `watch`
+  restore the entire provider section when a takeover deletes it. A pinned
+  leaf alone could not resurrect its missing managed parent, which left the
+  live file pointing at a provider that no longer existed; the whole-subtree
+  pin closes that gap.
+- `classify` now scores a protected value that was rewritten in place, so a CC
+  Switch rewrite that swaps a protected leaf (a provider `name`) is a clobber
+  instead of a benign edit. This is the remote-compaction recurrence: the bad
+  value used to be captured as the baseline.
+
+### Verified
+
+- Reproduced the Codex cross-session delegation defect on the real data: 11
+  `FunctionCallOutput { id: None, call_id: None }` injections, 8 contaminated
+  rollouts, and the NewAPI 400 (`code 11148 "tool calls and tool results do not
+  match"`) at 23:02:04 -> 23:05:51.
+- Real-data rehearsal: copying a contaminated rollout into a temporary Codex
+  home and running `sessions repair --apply` removed exactly one line, kept the
+  file valid JSON Lines, and cleared the re-scan (exit 2 -> 0).
+- `cargo test --workspace` 65 tests passing; clippy `-D warnings` clean.
+- Live incident 2026-10-18: a CC Switch restart clobbered the whole
+  `[model_providers.SailsAPI]` table; with the subtree pin and a re-captured
+  overlay, one `watch --once` cycle restored all 7 paths (identity and section
+  together) and the repaired file diffed empty against the pre-clobber backup.
+
 ## [v26.0-Alpha.8] — 2026-10-06
 
 ### Added

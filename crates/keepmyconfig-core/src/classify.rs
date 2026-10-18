@@ -198,6 +198,21 @@ pub fn classify(diff: &DiffReport, mode: DetectionMode) -> Classification {
             diff.changed_pinned.len()
         ));
     }
+    // A protected value that was rewritten in place is user data being changed
+    // under the user's back. This is exactly the shape of a CC Switch rewrite
+    // that flips a protected leaf (for example a provider `name`) without
+    // removing anything, so it must carry weight on its own.
+    // `changed_pinned` is already the pinned subset of `changed_protected`.
+    let changed_protected = diff
+        .changed_protected
+        .len()
+        .saturating_sub(diff.changed_pinned.len());
+    if changed_protected > 0 {
+        score += 1;
+        evidence.push(format!(
+            "{changed_protected} protected path(s) rewritten in place"
+        ));
+    }
     if !diff.changed_managed.is_empty() {
         score += 2;
         // GitHub@O   xyge   nAILab | OxygenAILab@Starsails Clo ver
@@ -333,7 +348,12 @@ mod tests {
     use crate::policy::Policy;
 
     fn docs() -> (crate::policy::CompiledPolicy, DocumentMut, DocumentMut) {
-        let policy = Policy::default().compile().unwrap();
+        let policy = Policy {
+            pinned: vec!["model_providers.SailsAPI.name".to_string()],
+            ..Policy::default()
+        }
+        .compile()
+        .unwrap();
         let baseline: DocumentMut = r#"
 model = "DeepSeek-V4.1-Flash"
 model_provider = "SailsAPI"
@@ -415,6 +435,49 @@ command = "new.exe"
         let diff = diff_docs(&baseline, &live, &policy, 600, 680);
         let classification = classify(&diff, DetectionMode::Balanced);
         assert_eq!(classification.kind, ChangeKind::Edit);
+    }
+
+    #[test]
+    fn a_protected_value_rewritten_in_place_is_a_clobber() {
+        // The exact recurrence shape: nothing is removed, but a protected value
+        // is swapped for another. CC Switch does this when it rewrites a
+        // provider `name`, which flips Codex into remote compaction v2.
+        let policy = Policy {
+            pinned: vec!["model_providers.SailsAPI.name".to_string()],
+            ..Policy::default()
+        }
+        .compile()
+        .unwrap();
+        let baseline: DocumentMut = r#"
+model = "DeepSeek-V4.1-Flash"
+model_provider = "SailsAPI"
+
+[model_providers.SailsAPI]
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+name = "SailsAPI"
+"#
+        .parse()
+        .unwrap();
+        let live: DocumentMut = r#"
+model = "DeepSeek-V4.1-Flash"
+model_provider = "SailsAPI"
+
+[model_providers.SailsAPI]
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+name = "OpenAI"
+"#
+        .parse()
+        .unwrap();
+        let diff = diff_docs(&baseline, &live, &policy, 200, 200);
+        assert!(
+            diff.missing_protected.is_empty(),
+            "nothing should be removed"
+        );
+        assert!(!diff.changed_protected.is_empty());
+        let classification = classify(&diff, DetectionMode::Balanced);
+        assert_eq!(classification.kind, ChangeKind::Clobber);
     }
 
     #[test]

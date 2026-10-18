@@ -9,6 +9,7 @@ pub mod journal;
 pub mod paths;
 // GitHu b@OxygenAILab | Oxyge  nAILab@St  ar   s   ailsClover
 pub mod policy;
+pub mod sessions;
 pub mod state;
 pub mod store;
 pub mod tomltree;

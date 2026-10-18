@@ -1,5 +1,11 @@
 mod autostart;
+mod bus;
 mod render;
+mod rules;
+mod sessions_render;
+
+/// Ops is always watched: it is the shared mailbox every session can write to.
+const DEFAULT_BUS_WATCH: &str = "env-ops=Ops";
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -10,6 +16,8 @@ use clap::{Parser, Subcommand};
 use keepmyconfig_core::assets::{self, BackupOptions, RestoreOptions};
 use keepmyconfig_core::ccswitch::{self, AdoptOptions};
 use keepmyconfig_core::paths::Paths;
+use keepmyconfig_core::sessions::TrimOptions as SessionTrimOptions;
+use keepmyconfig_core::sessions::{self, RepairOptions as SessionRepairOptions};
 use keepmyconfig_core::store::{RepairOptions, Store};
 use keepmyconfig_core::watch::{self, WatchOptions};
 use serde::Serialize;
@@ -29,6 +37,10 @@ struct Cli {
     /// Store directory (default: <codex_home>/.keepmyconfig)
     #[arg(long, global = true, value_name = "PATH")]
     store: Option<PathBuf>,
+
+    /// Cowork root for the collaboration bus (default: ~/Documents/Cowork)
+    #[arg(long, global = true, value_name = "PATH", env = "KMC_COWORK")]
+    cowork: Option<PathBuf>,
 
     /// Machine-readable JSON output
     #[arg(long, global = true)]
@@ -142,6 +154,25 @@ enum Command {
         command: CcSwitchCommand,
     },
 
+    /// Find and repair unpaired tool records in Codex session rollouts
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommand,
+    },
+
+    /// Cross-session collaboration bus (replaces the Codex in-app message system)
+    Bus {
+        #[command(subcommand)]
+        command: BusCommand,
+    },
+
+    /// Print the recommended AGENTS.md collaboration rule block
+    Rules {
+        /// Language: zh (default) or en
+        #[arg(long, default_value = "zh")]
+        lang: String,
+    },
+
     /// Check the environment and report compatibility
     Doctor,
 
@@ -205,6 +236,9 @@ enum AutostartCommand {
         /// Installation mechanism: Task Scheduler, Startup folder, or auto-fallback
         #[arg(long, value_enum, default_value_t = AutostartMethod::Auto)]
         method: AutostartMethod,
+        /// Watch a bus channel for an actor, `CHANNEL=ACTOR` (repeatable)
+        #[arg(long = "bus", value_name = "CHANNEL=ACTOR")]
+        bus: Vec<String>,
     },
     /// Remove the scheduled tasks and wrapper scripts
     Uninstall,
@@ -217,6 +251,148 @@ enum AutostartMethod {
     Auto,
     Task,
     Startup,
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionsCommand {
+    /// Report unpaired tool records across every session rollout
+    Scan {
+        /// Include the full per-file finding list
+        #[arg(long)]
+        full: bool,
+    },
+    /// Remove unpaired tool records (dry run unless --apply)
+    Repair {
+        /// Write the changes
+        #[arg(long)]
+        apply: bool,
+        /// Which records to remove: outputs (default), calls, or all
+        #[arg(long, default_value = "outputs")]
+        what: String,
+        /// Also delete the orphan rows from the history database projection
+        #[arg(long)]
+        purge_projection: bool,
+        /// Allow writing the history database while Codex is running
+        #[arg(long)]
+        force: bool,
+    },
+    /// Replace inline base64 images with a path-only placeholder (dry run unless --apply)
+    TrimImages {
+        /// Write the changes
+        #[arg(long)]
+        apply: bool,
+        /// Only this thread id
+        #[arg(long)]
+        thread: Option<String>,
+        /// Also delete the trimmed rows from the history database projection
+        #[arg(long)]
+        purge_projection: bool,
+        /// Allow writing the history database while Codex is running
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum BusCommand {
+    /// Create the channel board, index, and README
+    Init {
+        #[arg(long, default_value = "default")]
+        channel: String,
+    },
+    /// Backfill the index from an existing hand-written board (board is unchanged)
+    Adopt {
+        #[arg(long, default_value = "default")]
+        channel: String,
+    },
+    /// Append a message to a channel
+    Post {
+        #[arg(long, default_value = "default")]
+        channel: String,
+        /// Speaker, for example "UI (UI9)"
+        #[arg(long)]
+        from: String,
+        /// Recipient names (comma separated, or "all")
+        #[arg(long, value_delimiter = ',')]
+        to: Vec<String>,
+        /// Message body
+        #[arg(long)]
+        body: String,
+        /// Reference another message id
+        #[arg(long)]
+        reply_to: Option<String>,
+        /// Question tags such as Q1
+        #[arg(long, value_delimiter = ',')]
+        ask: Vec<String>,
+        /// Thread file under threads/
+        #[arg(long)]
+        thread: Option<String>,
+        /// Mark the message as expecting an answer
+        #[arg(long)]
+        wants_reply: bool,
+        /// Override the timestamp
+        #[arg(long)]
+        ts: Option<String>,
+    },
+    /// Show a channel window and advance the reader cursor
+    Read {
+        #[arg(long, default_value = "default")]
+        channel: String,
+        /// Actor whose cursor is used, for example "UI (UI9)"
+        #[arg(long)]
+        r#as: Option<String>,
+        /// Only messages after this id
+        #[arg(long)]
+        since: Option<String>,
+        /// Only messages addressed to this recipient
+        #[arg(long)]
+        to: Option<String>,
+        /// Selector (only "all" is supported today)
+        #[arg(long, default_value = "all")]
+        selector: String,
+        /// Shorthand for --selector unread
+        #[arg(long)]
+        unread: bool,
+        /// Print full bodies instead of previews
+        #[arg(long)]
+        full: bool,
+        /// Print without advancing the reader cursor
+        #[arg(long)]
+        peek: bool,
+    },
+    /// Per-recipient unread counts
+    Unread {
+        #[arg(long, default_value = "default")]
+        channel: String,
+    },
+    /// Show a desktop toast for the acting session (does not wake it)
+    Popup {
+        #[arg(long, default_value = "default")]
+        channel: String,
+        #[arg(long)]
+        r#as: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Notify-only watch: toast new mail for one actor, never wake a session
+    Watch {
+        #[arg(long, default_value = "default")]
+        channel: String,
+        #[arg(long)]
+        r#as: String,
+        /// Run one pass and exit
+        #[arg(long)]
+        once: bool,
+        /// Detect and report without raising a toast
+        #[arg(long)]
+        dry_run: bool,
+        /// Poll interval for the loop mode (for example 60s)
+        #[arg(long, default_value = "60s")]
+        poll: String,
+        /// Suppress the report line
+        #[arg(long)]
+        quiet: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -384,25 +560,48 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Ccswitch { command } => run_ccswitch(&store, command, json),
+        Command::Sessions { command } => run_sessions(&store, command, json),
+        Command::Bus { command } => run_bus(cli.cowork, command, json),
+        Command::Rules { lang } => {
+            print!("{}", rules::text(&lang));
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Doctor => run_doctor(&store, json),
-        Command::Autostart { command } => run_autostart(&store, command, json),
+        Command::Autostart { command } => run_autostart(cli.cowork, &store, command, json),
     }
 }
 
-fn run_autostart(store: &Store, command: AutostartCommand, json: bool) -> Result<ExitCode> {
+fn run_autostart(
+    cowork: Option<PathBuf>,
+    store: &Store,
+    command: AutostartCommand,
+    json: bool,
+) -> Result<ExitCode> {
     match command {
         AutostartCommand::Install {
             interval_minutes,
             no_daemon,
             method,
+            bus,
         } => {
             let method = match method {
                 AutostartMethod::Auto => autostart::InstallMethod::Auto,
                 AutostartMethod::Task => autostart::InstallMethod::Task,
                 AutostartMethod::Startup => autostart::InstallMethod::Startup,
             };
-            let report = autostart::install(store, interval_minutes, no_daemon, method)
-                .context("cannot install autostart tasks")?;
+            let mut watches = vec![DEFAULT_BUS_WATCH.to_string()];
+            watches.extend(bus);
+            let watches = parse_bus_watches(&watches)?;
+            let cowork_root = bus::root(cowork)?;
+            let report = autostart::install(
+                store,
+                interval_minutes,
+                no_daemon,
+                method,
+                &watches,
+                &cowork_root,
+            )
+            .context("cannot install autostart tasks")?;
             print_value(json, &report, render::autostart_text(&report))?;
         }
         AutostartCommand::Uninstall => {
@@ -412,6 +611,234 @@ fn run_autostart(store: &Store, command: AutostartCommand, json: bool) -> Result
         AutostartCommand::Status => {
             let status = autostart::status(store).context("cannot read autostart status")?;
             print_value(json, &status, render::autostart_status_text(&status))?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Parse `CHANNEL=ACTOR` pairs for `autostart install --bus`.
+fn parse_bus_watches(values: &[String]) -> Result<Vec<autostart::BusWatch>> {
+    let mut watches = Vec::new();
+    for value in values {
+        let (channel, actor) = value
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--bus expects CHANNEL=ACTOR, got '{value}'"))?;
+        let channel = channel.trim();
+        let actor = actor.trim();
+        if channel.is_empty() || actor.is_empty() {
+            anyhow::bail!("--bus expects CHANNEL=ACTOR, got '{value}'");
+        }
+        watches.push(autostart::BusWatch {
+            channel: channel.to_string(),
+            actor: actor.to_string(),
+        });
+    }
+    Ok(watches)
+}
+
+fn run_sessions(store: &Store, command: SessionsCommand, json: bool) -> Result<ExitCode> {
+    match command {
+        SessionsCommand::Scan { full } => {
+            let report = sessions::scan(store.paths().codex_home.as_path())
+                .context("cannot scan Codex sessions")?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print!("{}", sessions_render::scan_text(&report, full));
+            }
+            if report.orphan_outputs > 0 {
+                Ok(ExitCode::from(2))
+            } else {
+                Ok(ExitCode::SUCCESS)
+            }
+        }
+        SessionsCommand::Repair {
+            apply,
+            what,
+            purge_projection,
+            force,
+        } => {
+            let options = SessionRepairOptions {
+                apply,
+                what,
+                purge_projection,
+                force,
+            };
+            let report =
+                sessions::repair(store, &options).context("cannot repair Codex sessions")?;
+            print_value(json, &report, sessions_render::repair_text(&report))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        SessionsCommand::TrimImages {
+            apply,
+            thread,
+            purge_projection,
+            force,
+        } => {
+            let options = SessionTrimOptions {
+                apply,
+                thread,
+                purge_projection,
+                force,
+            };
+            let report = sessions::trim_images(store, &options)
+                .context("cannot trim Codex session images")?;
+            print_value(json, &report, sessions_render::trim_text(&report))?;
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn run_bus(cowork: Option<PathBuf>, command: BusCommand, json: bool) -> Result<ExitCode> {
+    let root = bus::root(cowork)?;
+    match command {
+        BusCommand::Init { channel } => {
+            let dir = bus::init(&root, &channel)?;
+            if json {
+                print_json(&serde_json::json!({ "channel": channel, "dir": dir }))?;
+            } else {
+                println!("已初始化协作总线频道 {channel}\n  {}", dir.display());
+            }
+        }
+        BusCommand::Adopt { channel } => {
+            let report = bus::adopt(&root, &channel)?;
+            if json {
+                print_json(&report)?;
+            } else {
+                println!(
+                    "已接入频道 {}：回填 {} 条，跳过 {} 条（重复）",
+                    report.channel, report.adopted, report.skipped
+                );
+                println!("  看板(未改动): {}", report.board);
+                println!("  索引: {}", report.index);
+                if !report.seeded_actors.is_empty() {
+                    println!(
+                        "  已把以下会话的游标置到末条(不回灌未读): {}",
+                        report.seeded_actors.join(", ")
+                    );
+                }
+            }
+        }
+        BusCommand::Post {
+            channel,
+            from,
+            to,
+            body,
+            reply_to,
+            ask,
+            thread,
+            wants_reply,
+            ts,
+        } => {
+            let message = bus::Message {
+                id: String::new(),
+                channel: channel.clone(),
+                ts: ts.unwrap_or_default(),
+                from,
+                to,
+                body,
+                reply_to,
+                asks: ask,
+                thread,
+                wants_reply,
+            };
+            let report = bus::post(&root, message)?;
+            if json {
+                print_json(&report)?;
+            } else if let Some(original) = &report.duplicate_of {
+                println!("重复消息，已存在 {}（未重复写入）", original);
+            } else {
+                println!("已投递 {} → {}", report.id, report.recipients.join(", "));
+                println!("  {}", report.board);
+            }
+        }
+        BusCommand::Read {
+            channel,
+            r#as,
+            since,
+            to,
+            selector,
+            unread,
+            full,
+            peek,
+        } => {
+            let options = bus::ReadOptions {
+                since,
+                to_actor: to,
+                selector: if unread {
+                    "unread".to_string()
+                } else {
+                    selector
+                },
+                as_session: r#as,
+                all: false,
+                mark_read: !peek,
+            };
+            let report = bus::read(&root, &channel, &options)?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print!("{}", bus::render_read(&report, full));
+            }
+        }
+        BusCommand::Unread { channel } => {
+            let counts = bus::unread(&root, &channel)?;
+            if json {
+                print_json(&counts)?;
+            } else {
+                print!("{}", bus::render_unread(&channel, &counts));
+            }
+        }
+        BusCommand::Popup {
+            channel,
+            r#as,
+            dry_run,
+        } => {
+            let text = bus::notify(&root, &channel, &r#as)?;
+            if text.is_empty() {
+                if !json {
+                    println!("协作总线 {}: 没有未读。", r#as);
+                }
+            } else if dry_run {
+                println!("{text}");
+            } else {
+                bus::popup("协作总线", &text)?;
+                if !json {
+                    println!("{text}");
+                }
+            }
+        }
+        BusCommand::Watch {
+            channel,
+            r#as,
+            once,
+            dry_run,
+            poll,
+            quiet,
+        } => {
+            let interval = parse_duration(&poll)?;
+            loop {
+                match bus::watch_once(&root, &channel, &r#as, !dry_run) {
+                    Ok(report) => {
+                        if json {
+                            print_json(&report)?;
+                        } else if !quiet && (report.unread > 0 || report.open_questions > 0) {
+                            println!(
+                                "[{}] {} 未读 {} · 待回复 {}",
+                                report.channel, report.actor, report.unread, report.open_questions
+                            );
+                        }
+                    }
+                    // A one-shot pass should surface the error; a loop should keep
+                    // waiting rather than die on a transient failure.
+                    Err(error) if once => return Err(error),
+                    Err(error) => eprintln!("bus watch: {error:#}"),
+                }
+                if once {
+                    break;
+                }
+                std::thread::sleep(interval);
+            }
         }
     }
     Ok(ExitCode::SUCCESS)

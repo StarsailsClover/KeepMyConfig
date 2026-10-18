@@ -12,6 +12,35 @@ const TASK_CHECK: &str = "KeepMyConfig-Check";
 const WRAPPER_WATCH: &str = "watch-daemon.cmd";
 const WRAPPER_CHECK: &str = "watch-once.cmd";
 const STARTUP_SCRIPT: &str = "KeepMyConfig.cmd";
+const BUS_WRAPPER_PREFIX: &str = "bus-watch-";
+const TASK_BUS_PREFIX: &str = "KeepMyConfig-Bus-";
+
+/// A channel watched on behalf of an actor that cannot run itself (Ops).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BusWatch {
+    pub channel: String,
+    pub actor: String,
+}
+
+impl BusWatch {
+    /// Wrap a label so only filesystem- and task-safe characters remain, while
+    /// staying readable in the Startup folder and Task Scheduler.
+    pub fn slug(&self) -> String {
+        let raw = format!("{}-{}", self.channel, self.actor);
+        let mut out = String::new();
+        let mut last_dash = false;
+        for ch in raw.chars() {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch);
+                last_dash = false;
+            } else if !last_dash {
+                out.push('-');
+                last_dash = true;
+            }
+        }
+        out.trim_matches('-').to_string()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallMethod {
@@ -73,6 +102,8 @@ pub fn install(
     interval_minutes: u64,
     no_daemon: bool,
     method: InstallMethod,
+    bus_watches: &[BusWatch],
+    cowork: &Path,
 ) -> Result<AutostartReport> {
     if !cfg!(windows) {
         bail!(
@@ -87,7 +118,7 @@ pub fn install(
     let mut tasks_installed = false;
 
     if method != InstallMethod::Startup {
-        match create_tasks(&current, interval_minutes, no_daemon) {
+        match create_tasks(&current, interval_minutes, no_daemon, bus_watches, cowork) {
             Ok(task_details) => {
                 tasks_installed = true;
                 details.extend(task_details);
@@ -121,6 +152,8 @@ pub fn install(
                 &current.codex_home,
                 &current.store_dir,
                 interval_minutes,
+                bus_watches,
+                cowork,
             ),
         )
         .with_context(|| format!("cannot write {}", startup_script.display()))?;
@@ -145,7 +178,24 @@ pub fn uninstall(store: &Store) -> Result<AutostartReport> {
     }
     let current = status(store)?;
     let mut details = Vec::new();
-    for task in [TASK_WATCH, TASK_CHECK] {
+    let mut tasks: Vec<String> = vec![TASK_WATCH.to_string(), TASK_CHECK.to_string()];
+    // Discover any bus tasks so uninstall cleans up after a changed watch list.
+    if let Ok(output) = Command::new("schtasks")
+        .args(["/Query", "/FO", "LIST"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if let Some(name) = trimmed.strip_prefix("TaskName:") {
+                let name = name.trim();
+                if name.contains(TASK_BUS_PREFIX) {
+                    tasks.push(name.rsplit('\\').next().unwrap_or(name).to_string());
+                }
+            }
+        }
+    }
+    for task in &tasks {
         if task_exists(task) {
             match run_schtasks(&["/Delete", "/F", "/TN", task]) {
                 // Git   Hub@Oxygen AILab | OxygenAILab@Stars  ailsC lover
@@ -188,6 +238,8 @@ fn create_tasks(
     current: &AutostartStatus,
     interval_minutes: u64,
     no_daemon: bool,
+    bus_watches: &[BusWatch],
+    cowork: &Path,
 ) -> Result<Vec<String>> {
     let mut details = Vec::new();
     util::atomic_write(
@@ -242,6 +294,49 @@ fn create_tasks(
     details.push(format!(
         "task: {TASK_CHECK} (every {interval_minutes} minute(s), one-shot repair)"
     ));
+
+    if !bus_watches.is_empty() {
+        let label = bus_watches
+            .iter()
+            .map(BusWatch::slug)
+            .collect::<Vec<_>>()
+            .join("_");
+        let mut bus_lines = String::from("@echo off\r\nsetlocal\r\n");
+        for watch in bus_watches {
+            bus_lines.push_str(&format!(
+                "\"{}\" --cowork \"{}\" bus watch --once --quiet --channel \"{}\" --as \"{}\"\r\n",
+                current.executable.display(),
+                cowork.display(),
+                watch.channel,
+                watch.actor
+            ));
+        }
+        let bus_wrapper = current
+            .watch_wrapper
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(format!("{BUS_WRAPPER_PREFIX}{label}.cmd"));
+        util::atomic_write(&bus_wrapper, &bus_lines)
+            .with_context(|| format!("cannot write {}", bus_wrapper.display()))?;
+        let task = format!("{TASK_BUS_PREFIX}{label}");
+        run_schtasks(&[
+            "/Create",
+            "/F",
+            "/TN",
+            &task,
+            "/SC",
+            "MINUTE",
+            "/MO",
+            &interval_minutes.to_string(),
+            "/TR",
+            &format!("\"{}\"", bus_wrapper.display()),
+        ])
+        .context("cannot create the collaboration-bus task")?;
+        details.push(format!(
+            "task: {task} (every {interval_minutes} minute(s), notify-only bus watch)"
+        ));
+    }
     Ok(details)
 }
 
@@ -274,14 +369,29 @@ fn startup_loop_script(
     codex_home: &Path,
     store_dir: &Path,
     interval_minutes: u64,
+    bus_watches: &[BusWatch],
+    cowork: &Path,
 ) -> String {
     // G  it Hub@Oxyge nAILab  | OxygenAILab@Star   sail  sCl  o   ve  r
     let seconds = interval_minutes * 60;
-    format!(
-        "@echo off\r\nsetlocal\r\n:loop\r\n\"{}\" --codex-home \"{}\" --store \"{}\" watch --once --quiet\r\ntimeout /t {seconds} /nobreak >nul\r\ngoto loop\r\n",
+    let mut body = String::new();
+    body.push_str(&format!(
+        "\"{}\" --codex-home \"{}\" --store \"{}\" watch --once --quiet\r\n",
         executable.display(),
         codex_home.display(),
         store_dir.display()
+    ));
+    for watch in bus_watches {
+        body.push_str(&format!(
+            "\"{}\" --cowork \"{}\" bus watch --once --quiet --channel \"{}\" --as \"{}\"\r\n",
+            executable.display(),
+            cowork.display(),
+            watch.channel,
+            watch.actor
+        ));
+    }
+    format!(
+        "@echo off\r\nsetlocal\r\n:loop\r\n{body}timeout /t {seconds} /nobreak >nul\r\ngoto loop\r\n"
     )
 }
 
@@ -387,7 +497,9 @@ fn run_schtasks(args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hidden_launcher_vbs, startup_loop_script, wmi_launcher_ps1, wrapper_script};
+    use super::{
+        hidden_launcher_vbs, startup_loop_script, wmi_launcher_ps1, wrapper_script, BusWatch,
+    };
     use std::path::Path;
 
     #[test]
@@ -411,11 +523,40 @@ mod tests {
             Path::new(r"C:\Users\demo\.codex"),
             Path::new(r"C:\Users\demo\.codex\.keepmyconfig"),
             5,
+            &[],
+            Path::new(r"C:\Users\demo\Documents\Cowork"),
         );
         assert!(script.contains(":loop"));
         assert!(script.contains("watch --once --quiet"));
         assert!(script.contains("timeout /t 300 /nobreak"));
         assert!(script.contains("goto loop"));
+    }
+
+    #[test]
+    fn startup_loop_includes_bus_watches() {
+        let watches = vec![BusWatch {
+            channel: "env-ops".to_string(),
+            actor: "Ops".to_string(),
+        }];
+        let script = startup_loop_script(
+            Path::new(r"C:\Apps\KeepMyConfig\keepmyconfig.exe"),
+            Path::new(r"C:\Users\demo\.codex"),
+            Path::new(r"C:\Users\demo\.codex\.keepmyconfig"),
+            5,
+            &watches,
+            Path::new(r"C:\Users\demo\Documents\Cowork"),
+        );
+        assert!(script.contains("bus watch --once --quiet --channel \"env-ops\" --as \"Ops\""));
+        assert!(script.contains("--cowork \"C:\\Users\\demo\\Documents\\Cowork\""));
+    }
+
+    #[test]
+    fn bus_watch_slug_is_task_safe() {
+        let watch = BusWatch {
+            channel: "DemoApp+UI".to_string(),
+            actor: "Ops".to_string(),
+        };
+        assert_eq!(watch.slug(), "DemoApp-UI-Ops");
     }
 
     #[test]

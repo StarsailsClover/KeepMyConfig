@@ -87,6 +87,13 @@ pub struct Policy {
     pub ignored: Vec<String>,
     /// User-pinned overrides that win even inside a managed subtree (for
     /// example `model_providers.SailsAPI.name`).
+    ///
+    /// The default pins `model_provider`: Codex keyed existing sessions to the
+    /// provider name at creation time, and compaction reloads the session
+    /// under that identity. CC Switch's live takeover rewrites the key to
+    /// `custom`, which breaks every session created under `SailsAPI`, so the
+    /// identity must survive takeovers. Switching providers deliberately
+    /// requires `keepmyconfig capture` first, then the CC Switch switch.
     pub pinned: Vec<String>,
     pub assets: AssetPolicy,
 }
@@ -118,7 +125,7 @@ impl Default for Policy {
             // therefore neither protected nor restored. A hand-written `notify`
             // can be protected again by removing it from `ignored` in policy.toml.
             ignored: vec!["mcp_servers.node_repl".to_string(), "notify".to_string()],
-            pinned: Vec::new(),
+            pinned: vec!["model_provider".to_string()],
             assets: AssetPolicy::default(),
         }
     }
@@ -321,5 +328,18 @@ mod tests {
         assert!(!compiled.has_pinned_descendant(&segments(&["model_providers", "Other"])));
         assert!(compiled.is_protected(&segments(&["model_providers", "SailsAPI", "name"])));
         assert!(!compiled.is_protected(&segments(&["model_providers", "SailsAPI", "base_url"])));
+    }
+
+    #[test]
+    fn default_policy_pins_the_active_provider_identity() {
+        // CC Switch's live takeover rewrites `model_provider` to `custom`,
+        // which breaks sessions Codex keyed to `SailsAPI`. The pin makes the
+        // protected value win over the takeover, mirroring the intent that
+        // a non-`custom` provider is the only compaction-safe terminal state.
+        let compiled = Policy::default().compile().unwrap();
+        assert!(compiled.is_managed(&segments(&["model_provider"])));
+        assert!(compiled.is_pinned(&segments(&["model_provider"])));
+        assert!(compiled.is_protected(&segments(&["model_provider"])));
+        assert!(!compiled.has_pinned_descendant(&segments(&["model_providers"])));
     }
 }

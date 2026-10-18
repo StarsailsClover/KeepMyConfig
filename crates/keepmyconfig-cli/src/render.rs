@@ -446,7 +446,7 @@ pub fn human_bytes(bytes: u64) -> String {
     }
 }
 
-fn plural(count: usize, singular: &str, plural: &str) -> String {
+pub fn plural(count: usize, singular: &str, plural: &str) -> String {
     format!("{count} {}", if count == 1 { singular } else { plural })
 }
 

@@ -45,6 +45,14 @@ pub enum Error {
     #[error("asset operation failed: {0}")]
     Asset(String),
 
+    #[error("session repair error: {0}")]
+    Sessions(String),
+    // GitHub@OxygenAI Lab  | Oxyge nAILab @Starsa ilsClover
+    #[error(
+        "Codex is running and holds {0}; close the app or pass --force to rewrite the history database"
+    )]
+    CodexRunning(String),
+
     #[error("{0}")]
     Message(String),
 }

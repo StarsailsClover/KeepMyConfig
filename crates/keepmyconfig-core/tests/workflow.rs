@@ -740,3 +740,66 @@ fn store_lock_blocks_second_writer() {
     drop(lock);
     assert!(store.lock().is_ok());
 }
+
+#[test]
+fn watch_repairs_a_pinned_provider_name_rewrite() {
+    // The remote-compaction recurrence: nothing is removed, but a pinned
+    // provider `name` is swapped, which flips Codex into remote compaction v2.
+    let (_temp, paths, store) = setup(FULL_CONFIG);
+    store.init(None, false).unwrap();
+
+    // Pin the field that decides compaction routing, as the real store does.
+    // Load and re-save structurally: the serialized default policy already
+    // carries a multi-line `pinned`, so appending raw text at the end of the
+    // file would land it inside the `[assets]` table and be silently ignored.
+    let policy_path = paths.policy_file.clone();
+    let mut policy = keepmyconfig_core::policy::Policy::load(&policy_path).unwrap();
+    if !policy
+        .pinned
+        .iter()
+        .any(|p| p == "model_providers.SailsAPI.name")
+    {
+        policy
+            .pinned
+            .push("model_providers.SailsAPI.name".to_string());
+    }
+    policy.save(&policy_path).unwrap();
+    // The store compiles its policy at open time, so reopen it after editing the
+    // policy file, then re-baseline under the new policy.
+    let store = Store::open(paths.clone()).unwrap();
+    store.capture(None, None).unwrap();
+
+    let baseline = fs::read_to_string(&paths.config_file).unwrap();
+    assert!(baseline.contains("name = \"SailsAPI\""));
+
+    // Swap only the provider name, exactly as CC Switch's stored template does.
+    let rewritten = baseline.replace("name = \"SailsAPI\"", "name = \"OpenAI\"");
+    assert_ne!(rewritten, baseline);
+    fs::write(&paths.config_file, &rewritten).unwrap();
+
+    let report = store.status().unwrap();
+    assert_eq!(
+        report.classification.as_ref().map(|c| c.kind),
+        Some(keepmyconfig_core::classify::ChangeKind::Clobber),
+        "a rewritten pinned value must be a clobber: {:?}",
+        report.classification
+    );
+    assert!(
+        report
+            .diff
+            .as_ref()
+            .is_some_and(|diff| !diff.changed_pinned.is_empty()),
+        "the pinned field must be reported as changed"
+    );
+
+    let outcome = store.process(false).unwrap();
+    assert!(
+        matches!(outcome, ProcessOutcome::Repaired(_)),
+        "expected repair, got {outcome:?}"
+    );
+    let repaired = fs::read_to_string(&paths.config_file).unwrap();
+    assert!(
+        repaired.contains("name = \"SailsAPI\""),
+        "watch must restore the pinned provider name: {repaired}"
+    );
+}

@@ -222,6 +222,7 @@ registry is still added).
 <!-- GitHub @Oxyg enAILab |   OxygenAILab@StarsailsClo   v  er -->
 |---|---|
 | at least 1 protected path removed | +1 |
+| at least 1 protected path rewritten in place | +1 |
 | at least 3 protected paths removed | +1 |
 | at least 8 protected paths removed | +1 |
 | managed provider keys changed | +2 |
@@ -231,6 +232,74 @@ registry is still added).
 | `BROWSER_USE_CODEX_APP_VERSION` changed **and** protected paths were removed | forced clobber |
 
 `balanced` repairs at ≥4, `strict` at ≥3, `off` never auto-repairs.
+
+### Session repair
+
+Codex delegates across sessions with `create_thread` / `send_message_to_thread`.
+The app-server injects the tool result into the target session as its first turn
+input, but the matching tool call lives in the *parent* session. The persisted
+rollout therefore replays a tool result with no matching call, and a strict
+upstream rejects the whole request with `code 11148 "tool calls and tool results
+do not match"`. The session never recovers, and the UI shows 502/503.
+
+```
+keepmyconfig sessions scan            # report; exit 2 when a session is damaged
+keepmyconfig sessions scan --full      # every finding, not just samples
+keepmyconfig sessions repair           # dry run
+keepmyconfig sessions repair --apply   # remove the unpaired records
+keepmyconfig sessions repair --apply --purge-projection
+keepmyconfig sessions repair --apply --what calls   # interrupted calls instead
+keepmyconfig sessions trim-images                   # dry run: replace inline base64 images
+keepmyconfig sessions trim-images --apply           # a session bloated by screenshots
+```
+
+`scan` classifies each finding:
+
+| Kind | Meaning | Default action |
+|---|---|---|
+| `orphan-output` | tool result with no matching call | removed by `--what outputs` |
+| `dangling-call` | tool call with no result (aborted turn) | reported; removed by `--what calls` |
+
+The rollout JSONL is authoritative. `repair` backs each rollout into
+`backups/sessions/<timestamp>/`, rewrites it atomically, and rewinds
+`thread_history_projection_state` so the app replays the tail and rebuilds its
+projection. The history database is written only after a snapshot and is refused
+while `codex.exe` runs unless `--force`. Cross-session delegation results are
+tagged `delegation`; prefer keeping them out of the message system entirely.
+
+### Cross-session collaboration bus
+
+The Codex in-app message system is the very thing that damages sessions, so
+`keepmyconfig bus` provides a safe replacement: a plain shared directory that no
+agent tool touches the session history to use. It keeps the human-readable
+Markdown board and adds a machine-readable index for reliable read tracking.
+
+```
+keepmyconfig bus init   --channel demo-ui
+keepmyconfig bus post   --channel demo-ui --from "UI (UI9)" --to App \
+                        --body "..." --ask Q1 --wants-reply
+keepmyconfig bus read   --channel demo-ui --as "App"            # unread window, advances the cursor
+keepmyconfig bus read   --channel demo-ui --as "App" --full --peek   # full bodies, no cursor move
+keepmyconfig bus unread --channel demo-ui                        # per-recipient counts
+keepmyconfig bus popup  --channel demo-ui --as "App"             # desktop toast; does not wake the session
+keepmyconfig bus adopt  --channel demo-ui                        # index an existing hand-written board
+keepmyconfig rules                                                # print the AGENTS.md block to paste
+keepmyconfig bus watch  --channel env-ops --as "Ops" --once       # notify-only watcher (toast, never wakes)
+```
+
+Layout under the Cowork root (`--cowork`, `KMC_COWORK`, or `~/Documents/Cowork`):
+
+| Path | Purpose |
+|---|---|
+| `<channel>/messages.md` | append-only board, one block per message (for people) |
+| `<channel>/bus/index.jsonl` | one JSON record per message (authoritative, for agents) |
+| `<channel>/bus/cursors/<actor>.json` | that actor's last-seen id |
+
+Appending is atomic; an identical body from the same sender is detected and the
+original id is returned instead of writing a duplicate. An actor's identity key
+is its name before any parenthesis, lowercased, so `UI` and `UI (UI9)` are the
+same reader. `popup` is a one-way desktop notification: it never enqueues work
+into a session, which is why it is safe where `send_message_to_thread` is not.
 
 ## 7. Exit codes and JSON
 
@@ -252,6 +321,10 @@ Every report command supports `--json`; `journal.jsonl` is JSON Lines.
 | Repair restores an old value you no longer want | run `keepmyconfig capture` to re-baseline, or edit `policy.toml` |
 | CC Switch keeps clobbering | `keepmyconfig ccswitch adopt --apply` |
 | `auth.json` looks stale | it is intentionally never restored; sign in again or use `restore-assets --include-backup-only` deliberately |
+| Codex desktop app fell back to the old interface and lost its translations | The shell bundles its UI over the network at start-up and falls back to the built-in classic interface whenever those fetches fail. Restore a working egress, then fully quit and reopen the app; no sign-in change is needed. A bare `curl https://chatgpt.com` returning `403` is a Cloudflare bot-block and is not a reliable signal; check `https://github.com` instead. |
+| The desktop interface regressed again after a proxy or node change | Switch the Clash group (`GLOBAL`, or your subscription group) to a reachable region. Clash for Windows persists the pick in `profiles/list.yml` and `cache.db`, so it survives restarts. There is no supported setting that pins the shell version. |
+| A session fails every turn with `tool calls and tool results do not match` | `keepmyconfig sessions scan` to confirm, then `sessions repair --apply`. The cause is a cross-session delegation result; see section 6. |
+| One session stalls with `stream disconnected before completion` / `error decoding response body` while others are fast | It has huge inline images. `keepmyconfig sessions trim-images` reports the payloads and `--apply` replaces each with a path-only placeholder. |
 
 ## 9. Security notes
 

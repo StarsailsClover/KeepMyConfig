@@ -430,11 +430,14 @@ enabled = true
         let text = overlay.to_string();
         assert!(text.contains("approval_policy"));
         assert!(text.contains("prima-mock-api"));
-        // GitHub@Oxy  g   enAILab | Oxygen   A  ILab@   Starsai   lsClov   er
         assert!(text.contains("plugins"));
         assert!(!text.contains("base_url"));
         assert!(!text.contains("node_repl"));
-        assert!(!text.contains("model_provider"));
+        // `model` is managed and unpinned: dropped. `model_provider` is managed
+        // but pinned by default (sessions key on provider identity across
+        // compaction), so the protected value must survive projection.
+        assert!(!text.contains("\"gpt-5\""));
+        assert!(text.contains("model_provider"));
     }
 
     #[test]
