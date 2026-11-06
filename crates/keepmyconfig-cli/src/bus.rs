@@ -853,6 +853,7 @@ pub fn popup(_title: &str, _body: &str) -> Result<()> {
     bail!("popup is only implemented on Windows")
 }
 
+#[cfg(windows)]
 fn ps_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
