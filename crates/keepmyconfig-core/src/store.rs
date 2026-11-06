@@ -351,6 +351,12 @@ impl Store {
             parsed: false,
             parse_error: None,
         };
+        if let Some(live_text) = &live_text {
+            match parse_document(live_text, &self.paths.config_file.display().to_string()) {
+                Ok(_) => live_info.parsed = true,
+                Err(error) => live_info.parse_error = Some(error.to_string()),
+            }
+        }
 
         let mut classification = None;
         let mut diff = None;

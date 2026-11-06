@@ -136,6 +136,62 @@ fn doctor_reports_environment() {
     assert!(report["checks"].as_array().unwrap().len() >= 4);
 }
 
+#[test]
+fn doctor_checks_a_valid_config_before_init() {
+    let fixture = Fixture::new(FULL_CONFIG);
+    let doctor = fixture
+        .command()
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let config = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "config_toml")
+        .unwrap();
+    assert_eq!(config["status"], "ok");
+    assert_eq!(config["detail"], "present and parseable");
+
+    let status = fixture
+        .command()
+        .args(["status", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(report["live"]["parsed"], true);
+    assert_eq!(report["live"]["parse_error"], serde_json::Value::Null);
+}
+
+#[test]
+fn doctor_rejects_an_invalid_config_before_init() {
+    let fixture = Fixture::new("model = [\n");
+    let doctor = fixture
+        .command()
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let config = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "config_toml")
+        .unwrap();
+    assert_eq!(config["status"], "fail");
+    assert_ne!(config["detail"], "present and parseable");
+
+    let status = fixture
+        .command()
+        .args(["status", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(report["live"]["parsed"], false);
+    assert!(report["live"]["parse_error"].is_string());
+}
+
 fn sessions_fixture(config: &str, rollout: &str) -> Fixture {
     let fixture = Fixture::new(config);
     let dir = format!("{}/sessions/2026/10", fixture.home);
