@@ -7,6 +7,17 @@ and this project adheres to the BC version scheme (`v{Year}.{Major}-Alpha N`).
 
 ## [Unreleased]
 
+### Fixed
+
+- `doctor` now parses a live `config.toml` even when the KeepMyConfig store is
+  uninitialized, so a valid file is reported as `ok` instead of the
+  contradictory `fail / present and parseable` state. Invalid live TOML now
+  reports its parse error before initialization. ([#10](https://github.com/StarsailsClover/KeepMyConfig/issues/10))
+- The Windows-only PowerShell quoting helper is now conditionally compiled, so
+  non-Windows clippy does not report it as dead code. The notification test now
+  expects the documented unsupported-platform error instead of assuming a
+  Windows toast.
+
 ## [v26.0-Alpha.9] — 2026-10-11
 
 ### Added
