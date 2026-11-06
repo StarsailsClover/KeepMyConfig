@@ -1003,14 +1003,21 @@ mod tests {
         let again = watch_once(root, "chan", "Ops", false).unwrap();
         assert_eq!(again.unread, 2, "dry run must not advance the cursor");
 
-        // notify pass advances even when the toast is suppressed
+        // A notify pass raises a toast and advances the cursor on Windows.
         #[cfg(windows)]
-        let live = watch_once(root, "chan", "Ops", true).unwrap();
-        #[cfg(windows)]
-        assert_eq!(live.unread, 2);
+        {
+            let live = watch_once(root, "chan", "Ops", true).unwrap();
+            assert_eq!(live.unread, 2);
+            let empty = watch_once(root, "chan", "Ops", false).unwrap();
+            assert_eq!(empty.unread, 0, "cursor should have advanced");
+        }
+        // Non-Windows has no desktop toast implementation, so the cursor must
+        // remain unread after the documented unsupported-platform error.
         #[cfg(not(windows))]
-        assert!(watch_once(root, "chan", "Ops", true).is_err());
-        let empty = watch_once(root, "chan", "Ops", false).unwrap();
-        assert_eq!(empty.unread, 0, "cursor should have advanced");
+        {
+            assert!(watch_once(root, "chan", "Ops", true).is_err());
+            let empty = watch_once(root, "chan", "Ops", false).unwrap();
+            assert_eq!(empty.unread, 2, "cursor must not advance without a toast");
+        }
     }
 }
