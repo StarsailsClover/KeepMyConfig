@@ -1004,8 +1004,12 @@ mod tests {
         assert_eq!(again.unread, 2, "dry run must not advance the cursor");
 
         // notify pass advances even when the toast is suppressed
+        #[cfg(windows)]
         let live = watch_once(root, "chan", "Ops", true).unwrap();
+        #[cfg(windows)]
         assert_eq!(live.unread, 2);
+        #[cfg(not(windows))]
+        assert!(watch_once(root, "chan", "Ops", true).is_err());
         let empty = watch_once(root, "chan", "Ops", false).unwrap();
         assert_eq!(empty.unread, 0, "cursor should have advanced");
     }
